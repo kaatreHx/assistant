@@ -24,6 +24,3 @@ dist-ssr
 *.sw?
 
 .env
-supabase/functions/cbt-chat/index.ts
-utils/
-components/

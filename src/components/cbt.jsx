@@ -72,29 +72,29 @@ const CBTChat = () => {
     }
   }
 
-  // ✅ Voice-to-text handler
-  const handleVoiceInput = () => {
-    if (!('webkitSpeechRecognition' in window)) {
-      alert('Voice recognition not supported in this browser.')
-      return
-    }
+  // // ✅ Voice-to-text handler
+  // const handleVoiceInput = () => {
+  //   if (!('webkitSpeechRecognition' in window)) {
+  //     alert('Voice recognition not supported in this browser.')
+  //     return
+  //   }
 
-    const recognition = new window.webkitSpeechRecognition()
-    recognition.lang = 'en-US'
-    recognition.interimResults = false
-    recognition.maxAlternatives = 1
+  //   const recognition = new window.webkitSpeechRecognition()
+  //   recognition.lang = 'en-US'
+  //   recognition.interimResults = false
+  //   recognition.maxAlternatives = 1
 
-    recognition.start()
+  //   recognition.start()
 
-    recognition.onresult = (event) => {
-      const transcript = event.results[0][0].transcript
-      setInput(transcript)
-    }
+  //   recognition.onresult = (event) => {
+  //     const transcript = event.results[0][0].transcript
+  //     setInput(transcript)
+  //   }
 
-    recognition.onerror = (event) => {
-      console.error('Speech recognition error:', event.error)
-    }
-  }
+  //   recognition.onerror = (event) => {
+  //     console.error('Speech recognition error:', event.error)
+  //   }
+  // }
 
   // ✅ Logout
   const handleLogout = async () => {
@@ -126,7 +126,7 @@ const CBTChat = () => {
       </div>
 
       <div style={styles.inputBox}>
-        <button onClick={handleVoiceInput} style={styles.micButton}>🎤</button>
+        {/* <button onClick={handleVoiceInput} style={styles.micButton}>🎤</button> */}
         <input
           type="text"
           value={input}

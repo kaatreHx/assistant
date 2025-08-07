@@ -1,4 +1,5 @@
 // supabase/functions/cbt-chat/index.ts
+
 import OpenAI from "npm:openai";
 import { createClient } from "npm:@supabase/supabase-js";
 
@@ -21,19 +22,23 @@ function debugLog(step: string, data: any) {
   console.log(`🔍 [${step}]`, JSON.stringify(data, null, 2));
 }
 
+// --- Redirection messages if off-topic ---
+const redirectionMessages = [
+  "I'm here to help with how you're feeling. Want to talk about it?",
+  "Let’s focus on your emotional well-being. How are you doing today?",
+  "I'm here to listen if you're feeling off or stressed. What's on your mind?",
+];
+
 Deno.serve(async (req) => {
-  // ✅ Handle preflight
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
 
   try {
-    // --- Step 1: Parse JSON body ---
     let body;
     try {
       body = await req.json();
     } catch (err) {
-      console.error("❌ Error parsing JSON body:", err);
       return new Response(
         JSON.stringify({ error: "Invalid JSON body" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -42,37 +47,32 @@ Deno.serve(async (req) => {
 
     const { message, user_id } = body;
     if (!message || !user_id) {
-      console.error("❌ Missing message or user_id in request.");
       return new Response(
         JSON.stringify({ error: "Missing message or user_id" }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
+
     debugLog("Request Body", body);
 
     const authHeader = req.headers.get("authorization");
 
-    // --- Step 2: Create Supabase client ---
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-    if (!SUPABASE_URL) {
-      throw new Error("❌ Missing SUPABASE_URL environment variable");
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error("❌ Missing Supabase environment variables");
     }
-    if (!SUPABASE_SERVICE_ROLE_KEY) {
-      throw new Error("❌ Missing SUPABASE_SERVICE_ROLE_KEY environment variable");
-    }
-    
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
       global: { headers: { Authorization: authHeader || "" } },
     });
 
-    // --- Step 3: Sentiment analysis ---
+    // --- Sentiment Analysis ---
     let sentiment_score = 0;
     try {
       const sentimentCheck = await openai.chat.completions.create({
-        model: "gpt-4o-mini", // Try "gpt-3.5-turbo" if this fails
+        model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
@@ -86,6 +86,7 @@ Deno.serve(async (req) => {
       const rawScore = sentimentCheck.choices[0]?.message?.content?.trim() || "0";
       sentiment_score = parseFloat(rawScore);
       if (isNaN(sentiment_score)) sentiment_score = 0;
+
       debugLog("Sentiment Score", { rawScore, sentiment_score });
     } catch (err) {
       console.error("❌ Sentiment analysis failed:", err);
@@ -95,7 +96,7 @@ Deno.serve(async (req) => {
       );
     }
 
-    // --- Step 4: Tone selection ---
+    // --- Tone Prompt ---
     let tonePrompt =
       sentiment_score < -0.3
         ? "Be extra empathetic, validating, and reassuring."
@@ -103,15 +104,17 @@ Deno.serve(async (req) => {
         ? "Be positive, celebratory, and motivational."
         : "Be encouraging, practical, and neutral.";
 
-    // --- Step 5: CBT AI response ---
+    // --- CBT Response or Redirection ---
     let ai_reply = "";
     try {
       const cbtResponse = await openai.chat.completions.create({
-        model: "gpt-4o-mini", // Try "gpt-3.5-turbo" if this fails
+        model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
-            content: `You are a CBT-based productivity coach. ${tonePrompt}`,
+            content: `You are a CBT-based AI assistant. Keep responses short (max 2-3 lines), focused only on emotional well-being, productivity, or coping strategies. If the user's message is off-topic (like talking about games, entertainment, or random chat), do not respond to that directly—instead, respond with one of these:
+${redirectionMessages.map((msg, i) => `(${i + 1}) "${msg}"`).join("\n")}
+Use CBT techniques like validating, reframing, and goal-setting where appropriate.`,
           },
           { role: "user", content: message },
         ],
@@ -128,21 +131,11 @@ Deno.serve(async (req) => {
       );
     }
 
-    // --- Step 6: Store in Supabase ---
+    // --- Save conversation ---
     try {
       const { error: insertError } = await supabase.from("conversations").insert([
-        { 
-          user_id, 
-          messages: message, 
-          role: "user", 
-          sentiment_score
-        },
-        { 
-          user_id, 
-          messages: ai_reply, 
-          role: "ai", 
-          sentiment_score
-        },
+        { user_id, messages: message, role: "user", sentiment_score },
+        { user_id, messages: ai_reply, role: "ai", sentiment_score },
       ]);
 
       if (insertError) {
@@ -160,7 +153,6 @@ Deno.serve(async (req) => {
       );
     }
 
-    // ✅ Success
     return new Response(
       JSON.stringify({ reply: ai_reply, sentiment: sentiment_score }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }

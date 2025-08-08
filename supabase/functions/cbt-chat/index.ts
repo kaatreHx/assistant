@@ -22,7 +22,7 @@ function debugLog(step: string, data: any) {
   console.log(`🔍 [${step}]`, JSON.stringify(data, null, 2));
 }
 
-// --- Redirection messages if off-topic ---
+// --- Redirection messages ---
 const redirectionMessages = [
   "I'm here to help with how you're feeling. Want to talk about it?",
   "Let’s focus on your emotional well-being. How are you doing today?",
@@ -35,17 +35,9 @@ Deno.serve(async (req) => {
   }
 
   try {
-    let body;
-    try {
-      body = await req.json();
-    } catch (err) {
-      return new Response(
-        JSON.stringify({ error: "Invalid JSON body" }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
+    const body = await req.json();
     const { message, user_id } = body;
+
     if (!message || !user_id) {
       return new Response(
         JSON.stringify({ error: "Missing message or user_id" }),
@@ -55,8 +47,22 @@ Deno.serve(async (req) => {
 
     debugLog("Request Body", body);
 
-    const authHeader = req.headers.get("authorization");
+    const quickReplies = ["ok", "okay", "alright", "fine", "yep", "yes", "nah", "nope"];
+    if (quickReplies.includes(message.trim().toLowerCase())) {
+      const friendlyFollowUps = [
+        "Alright, take your time. I’m here if you need to talk.",
+        "Okay 😊. Let me know if you want to share more.",
+        "Got it. How are you feeling now?",
+        "Alright. Whenever you’re ready, we can chat more.",
+      ];
+      const reply = friendlyFollowUps[Math.floor(Math.random() * friendlyFollowUps.length)];
+      return new Response(
+        JSON.stringify({ reply, sentiment: 0 }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      );
+    }
 
+    const authHeader = req.headers.get("authorization");
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
@@ -67,6 +73,27 @@ Deno.serve(async (req) => {
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
       global: { headers: { Authorization: authHeader || "" } },
     });
+
+    // --- Fetch last few messages ---
+    const { data: prevMessages, error: fetchError } = await supabase
+      .from("conversations")
+      .select("messages, role")
+      .eq("user_id", user_id)
+      .order("id", { ascending: false })
+      .limit(5);
+
+    const contextMessages = [];
+    if (!fetchError && prevMessages) {
+      for (let i = prevMessages.length - 1; i >= 0; i--) {
+        const msg = prevMessages[i];
+        contextMessages.push({
+          role: msg.role === "ai" ? "assistant" : "user",
+          content: msg.messages,
+        });
+      }
+    }
+
+    contextMessages.push({ role: "user", content: message });
 
     // --- Sentiment Analysis ---
     let sentiment_score = 0;
@@ -96,59 +123,44 @@ Deno.serve(async (req) => {
       );
     }
 
-    // --- Tone Prompt ---
-    let tonePrompt =
-      sentiment_score < -0.3
-        ? "Be extra empathetic, validating, and reassuring."
-        : sentiment_score > 0.3
-        ? "Be positive, celebratory, and motivational."
-        : "Be encouraging, practical, and neutral.";
+    // --- GROQ API ---
+    const GROQ_API_KEY = Deno.env.get("GROQ_API_KEY");
+    if (!GROQ_API_KEY) throw new Error("Missing GROQ_API_KEY env var");
 
-    // --- CBT Response or Redirection ---
-    let ai_reply = "";
-    try {
-      const cbtResponse = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+    const groqResponse = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${GROQ_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: "llama3-8b-8192",
         messages: [
-          {
-            role: "system",
-            content: `You are a CBT-based AI assistant. Keep responses short (max 2-3 lines), focused only on emotional well-being, productivity, or coping strategies. If the user's message is off-topic (like talking about games, entertainment, or random chat), do not respond to that directly—instead, respond with one of these:
-${redirectionMessages.map((msg, i) => `(${i + 1}) "${msg}"`).join("\n")}
-Use CBT techniques like validating, reframing, and goal-setting where appropriate.`,
-          },
-          { role: "user", content: message },
+          { role: "system", content: "You are MindMate, a friendly CBT companion. Keep answers short, warm, and supportive." },
+          ...contextMessages
         ],
-        temperature: 0.7,
-      });
+        max_tokens: 150
+      })
+    });
 
-      ai_reply = cbtResponse.choices[0]?.message?.content?.trim() || "";
-      debugLog("AI Reply", ai_reply);
-    } catch (err) {
-      console.error("❌ CBT AI response failed:", err);
-      return new Response(
-        JSON.stringify({ error: "AI response generation failed" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
+    let ai_reply = redirectionMessages[Math.floor(Math.random() * redirectionMessages.length)];
+    if (groqResponse.ok) {
+      const groqData = await groqResponse.json();
+      ai_reply = groqData.choices[0]?.message?.content?.trim() || ai_reply;
+    } else {
+      console.error("GROQ API error:", await groqResponse.text());
     }
 
-    // --- Save conversation ---
-    try {
-      const { error: insertError } = await supabase.from("conversations").insert([
-        { user_id, messages: message, role: "user", sentiment_score },
-        { user_id, messages: ai_reply, role: "ai", sentiment_score },
-      ]);
+    // --- Save to Supabase ---
+    const { error: insertError } = await supabase.from("conversations").insert([
+      { user_id, messages: message, role: "user", sentiment_score },
+      { user_id, messages: ai_reply, role: "ai", sentiment_score },
+    ]);
 
-      if (insertError) {
-        console.error("❌ Supabase insert error:", insertError);
-        return new Response(
-          JSON.stringify({ error: "Database insert failed", details: insertError.message }),
-          { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-        );
-      }
-    } catch (err) {
-      console.error("❌ Supabase DB error:", err);
+    if (insertError) {
+      console.error("❌ Supabase insert error:", insertError);
       return new Response(
-        JSON.stringify({ error: "Database operation failed" }),
+        JSON.stringify({ error: "Database insert failed", details: insertError.message }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
